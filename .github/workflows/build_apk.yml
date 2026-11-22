@@ -14,15 +14,13 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 1
 
       - name: Set up Java
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: "17"
-        
+          cache: gradle
 
       - name: Set up Flutter
         uses: subosito/flutter-action@v2
@@ -32,6 +30,9 @@ jobs:
 
       - name: Create Flutter project
         run: flutter create --platforms android --org com.example .
+
+      - name: Remove generated sample test
+        run: rm -f test/widget_test.dart
 
       - name: Write pubspec.yaml
         run: |
@@ -52,7 +53,6 @@ jobs:
             google_mlkit_subject_segmentation: ^0.0.2
             gal: ^2.3.0
             image: ^4.3.0
-            permission_handler: ^11.3.1
             path_provider: ^2.1.4
 
           dev_dependencies:
@@ -69,7 +69,8 @@ jobs:
           cat << 'EOF' > android/app/src/main/AndroidManifest.xml
           <manifest xmlns:android="http://schemas.android.com/apk/res/android">
               <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
-              <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE"
+              <uses-permission
+                  android:name="android.permission.READ_EXTERNAL_STORAGE"
                   android:maxSdkVersion="32" />
 
               <application
@@ -124,11 +125,11 @@ jobs:
                 statusBarIconBrightness: Brightness.light,
               ),
             );
-            runApp(const MyPhotoRoomApp());
+            runApp(const PhotoRoomApp());
           }
 
-          class MyPhotoRoomApp extends StatelessWidget {
-            const MyPhotoRoomApp({super.key});
+          class PhotoRoomApp extends StatelessWidget {
+            const PhotoRoomApp({super.key});
 
             @override
             Widget build(BuildContext context) {
@@ -150,30 +151,6 @@ jobs:
             }
           }
 
-          class EditorSettings {
-            final Offset position;
-            final double scale;
-            final double angle;
-
-            const EditorSettings({
-              this.position = Offset.zero,
-              this.scale = 1,
-              this.angle = 0,
-            });
-
-            EditorSettings copyWith({
-              Offset? position,
-              double? scale,
-              double? angle,
-            }) {
-              return EditorSettings(
-                position: position ?? this.position,
-                scale: scale ?? this.scale,
-                angle: angle ?? this.angle,
-              );
-            }
-          }
-
           class HomeScreen extends StatefulWidget {
             const HomeScreen({super.key});
 
@@ -189,19 +166,19 @@ jobs:
                 source: ImageSource.gallery,
                 imageQuality: 100,
               );
-              if (file == null) return;
+              if (file == null || !mounted) return;
 
               setState(() => processing = true);
 
               final segmenter = SubjectSegmenter(
                 options: SubjectSegmenterOptions(
-                  enableForegroundBitmap: true,
-                  enableForegroundConfidenceMask: true,
+                  enableMultipleSubjects: false,
                 ),
               );
 
               try {
-                final result = await segmenter.processImage(
+                final SubjectSegmentationResult? result =
+                    await segmenter.processImage(
                   InputImage.fromFilePath(file.path),
                 );
 
@@ -213,7 +190,7 @@ jobs:
 
                 if (!mounted) return;
                 await Navigator.of(context).push(
-                  MaterialPageRoute(
+                  MaterialPageRoute<void>(
                     builder: (_) => EditorScreen(cutoutBytes: cutout),
                   ),
                 );
@@ -232,7 +209,7 @@ jobs:
 
             Future<Uint8List> createCutout(
               String sourcePath,
-              SubjectSegmenterResult result,
+              SubjectSegmentationResult result,
             ) async {
               final sourceBytes = await File(sourcePath).readAsBytes();
               final decoded = img.decodeImage(sourceBytes);
@@ -284,11 +261,27 @@ jobs:
                         child: Column(
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
-                            const Row(
+                            Row(
                               children: [
-                                _Logo(),
-                                SizedBox(width: 12),
-                                Text(
+                                Container(
+                                  width: 42,
+                                  height: 42,
+                                  decoration: BoxDecoration(
+                                    gradient: const LinearGradient(
+                                      colors: [
+                                        Color(0xFF9B5CF6),
+                                        Color(0xFF5B79FF),
+                                      ],
+                                    ),
+                                    borderRadius: BorderRadius.circular(12),
+                                  ),
+                                  child: const Icon(
+                                    Icons.auto_awesome,
+                                    color: Colors.white,
+                                  ),
+                                ),
+                                const SizedBox(width: 12),
+                                const Text(
                                   'My PhotoRoom',
                                   style: TextStyle(
                                     fontSize: 22,
@@ -346,14 +339,14 @@ jobs:
                               ),
                             ),
                             const SizedBox(height: 14),
-                            const GridView.count(
+                            GridView.count(
                               shrinkWrap: true,
-                              physics: NeverScrollableScrollPhysics(),
+                              physics: const NeverScrollableScrollPhysics(),
                               crossAxisCount: 2,
                               mainAxisSpacing: 12,
                               crossAxisSpacing: 12,
                               childAspectRatio: 1.35,
-                              children: [
+                              children: const [
                                 QuickCard(
                                   title: 'Transparent',
                                   icon: Icons.grid_on,
@@ -402,25 +395,6 @@ jobs:
                     ],
                   ),
                 ),
-              );
-            }
-          }
-
-          class _Logo extends StatelessWidget {
-            const _Logo();
-
-            @override
-            Widget build(BuildContext context) {
-              return Container(
-                width: 42,
-                height: 42,
-                decoration: BoxDecoration(
-                  gradient: const LinearGradient(
-                    colors: [Color(0xFF9B5CF6), Color(0xFF5B79FF)],
-                  ),
-                  borderRadius: BorderRadius.circular(12),
-                ),
-                child: const Icon(Icons.auto_awesome, color: Colors.white),
               );
             }
           }
@@ -522,29 +496,51 @@ jobs:
             Widget build(BuildContext context) {
               return AnimatedBuilder(
                 animation: controller,
-                builder: (_, __) {
-                  return Container(
-                    width: 94,
-                    height: 94,
-                    decoration: BoxDecoration(
-                      shape: BoxShape.circle,
-                      border: Border.all(
-                        color: const Color(0xFF7F72FF),
-                        width: 3,
-                      ),
-                      boxShadow: [
-                        BoxShadow(
-                          color: const Color(0xFF715EFF).withValues(
-                            alpha: 0.25 + controller.value * 0.55,
-                          ),
-                          blurRadius: 18 + controller.value * 18,
-                          spreadRadius: 4,
-                        ),
-                      ],
+                builder: (_, __) => Container(
+                  width: 94,
+                  height: 94,
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    border: Border.all(
+                      color: const Color(0xFF7F72FF),
+                      width: 3,
                     ),
-                    child: const Icon(Icons.person_search, size: 42),
-                  );
-                },
+                    boxShadow: [
+                      BoxShadow(
+                        color: const Color(0xFF715EFF).withValues(
+                          alpha: 0.25 + controller.value * 0.55,
+                        ),
+                        blurRadius: 18 + controller.value * 18,
+                        spreadRadius: 4,
+                      ),
+                    ],
+                  ),
+                  child: const Icon(Icons.person_search, size: 42),
+                ),
+              );
+            }
+          }
+
+          class EditorSettings {
+            final Offset position;
+            final double scale;
+            final double angle;
+
+            const EditorSettings({
+              this.position = Offset.zero,
+              this.scale = 1,
+              this.angle = 0,
+            });
+
+            EditorSettings copyWith({
+              Offset? position,
+              double? scale,
+              double? angle,
+            }) {
+              return EditorSettings(
+                position: position ?? this.position,
+                scale: scale ?? this.scale,
+                angle: angle ?? this.angle,
               );
             }
           }
@@ -562,29 +558,33 @@ jobs:
           }
 
           class _EditorScreenState extends State<EditorScreen> {
+            late final Future<ui.Image> cutoutImage;
             final List<EditorSettings> history = [const EditorSettings()];
             int historyIndex = 0;
-
-            EditorSettings get settings => history[historyIndex];
 
             Offset gestureStartPosition = Offset.zero;
             double gestureStartScale = 1;
             double gestureStartAngle = 0;
             bool showGuides = false;
 
-            void pushState(EditorSettings next) {
+            EditorSettings get settings => history[historyIndex];
+
+            @override
+            void initState() {
+              super.initState();
+              cutoutImage = decodeImageFromList(widget.cutoutBytes);
+            }
+
+            void saveGestureState() {
               if (historyIndex < history.length - 1) {
                 history.removeRange(historyIndex + 1, history.length);
               }
-              history.add(next);
+              history.add(settings);
               historyIndex = history.length - 1;
-              setState(() {});
             }
 
             void undo() {
-              if (historyIndex > 0) {
-                setState(() => historyIndex--);
-              }
+              if (historyIndex > 0) setState(() => historyIndex--);
             }
 
             void redo() {
@@ -602,11 +602,7 @@ jobs:
                   '${DateTime.now().millisecondsSinceEpoch}.png',
                 );
                 await file.writeAsBytes(bytes);
-
-                await Gal.putImage(
-                  file.path,
-                  album: 'My PhotoRoom',
-                );
+                await Gal.putImage(file.path, album: 'My PhotoRoom');
 
                 if (!mounted) return;
                 ScaffoldMessenger.of(context).showSnackBar(
@@ -622,21 +618,17 @@ jobs:
 
             Future<Uint8List> renderPng() async {
               const int outputSize = 2048;
-
-              final ui.Image cutout = await decodeImageFromList(
-                widget.cutoutBytes,
-              );
+              final image = await cutoutImage;
               final recorder = ui.PictureRecorder();
               final canvas = Canvas(recorder);
 
-              final double ratio = cutout.width > cutout.height
-                  ? cutout.height / cutout.width
-                  : cutout.width / cutout.height;
-
-              final double baseWidth = cutout.width > cutout.height
+              final double ratio = image.width > image.height
+                  ? image.height / image.width
+                  : image.width / image.height;
+              final double baseWidth = image.width > image.height
                   ? outputSize.toDouble()
                   : outputSize * ratio;
-              final double baseHeight = cutout.height >= cutout.width
+              final double baseHeight = image.height >= image.width
                   ? outputSize.toDouble()
                   : outputSize * ratio;
 
@@ -652,45 +644,33 @@ jobs:
               canvas.rotate(settings.angle);
               canvas.translate(-drawWidth / 2, -drawHeight / 2);
               canvas.drawImageRect(
-                cutout,
+                image,
                 Rect.fromLTWH(
                   0,
                   0,
-                  cutout.width.toDouble(),
-                  cutout.height.toDouble(),
+                  image.width.toDouble(),
+                  image.height.toDouble(),
                 ),
-                Rect.fromLTWH(
-                  0,
-                  0,
-                  drawWidth,
-                  drawHeight,
-                ),
+                Rect.fromLTWH(0, 0, drawWidth, drawHeight),
                 Paint(),
               );
               canvas.restore();
 
-              final picture = recorder.endRecording();
-              final rendered = await picture.toImage(outputSize, outputSize);
-              final byteData = await rendered.toByteData(
+              final rendered = await recorder.endRecording().toImage(
+                    outputSize,
+                    outputSize,
+                  );
+              final data = await rendered.toByteData(
                 format: ui.ImageByteFormat.png,
               );
-
-              if (byteData == null) {
-                throw Exception('Unable to encode PNG');
-              }
-              return byteData.buffer.asUint8List();
+              if (data == null) throw Exception('Unable to encode PNG');
+              return data.buffer.asUint8List();
             }
 
             @override
             Widget build(BuildContext context) {
               return Scaffold(
                 appBar: AppBar(
-                  backgroundColor: const Color(0xFF111218),
-                  elevation: 0,
-                  leading: IconButton(
-                    icon: const Icon(Icons.arrow_back),
-                    onPressed: () => Navigator.pop(context),
-                  ),
                   title: const Text(
                     'Edit Photo',
                     style: TextStyle(fontWeight: FontWeight.w800),
@@ -701,9 +681,8 @@ jobs:
                       icon: const Icon(Icons.undo),
                     ),
                     IconButton(
-                      onPressed: historyIndex < history.length - 1
-                          ? redo
-                          : null,
+                      onPressed:
+                          historyIndex < history.length - 1 ? redo : null,
                       icon: const Icon(Icons.redo),
                     ),
                     Padding(
@@ -735,8 +714,7 @@ jobs:
                             },
                             onScaleUpdate: (details) {
                               Offset position =
-                                  gestureStartPosition +
-                                      details.focalPointDelta;
+                                  gestureStartPosition + details.focalPointDelta;
 
                               if (position.dx.abs() < 18) {
                                 position = Offset(0, position.dy);
@@ -748,28 +726,44 @@ jobs:
                               setState(() {
                                 showGuides =
                                     position.dx == 0 || position.dy == 0;
-                                history[historyIndex] =
-                                    settings.copyWith(
+                                history[historyIndex] = settings.copyWith(
                                   position: position,
-                                  scale: (gestureStartScale *
-                                          details.scale)
+                                  scale: (gestureStartScale * details.scale)
                                       .clamp(0.25, 5.0),
-                                  angle: gestureStartAngle +
-                                      details.rotation,
+                                  angle:
+                                      gestureStartAngle + details.rotation,
                                 );
                               });
                             },
                             onScaleEnd: (_) {
-                              pushState(settings);
+                              final current = settings;
+                              if (historyIndex < history.length - 1) {
+                                history.removeRange(
+                                  historyIndex + 1,
+                                  history.length,
+                                );
+                              }
+                              history.add(current);
+                              historyIndex = history.length - 1;
                               setState(() => showGuides = false);
                             },
-                            child: CustomPaint(
-                              painter: CanvasPainter(
-                                cutoutBytes: widget.cutoutBytes,
-                                settings: settings,
-                                showGuides: showGuides,
-                              ),
-                              size: canvasSize,
+                            child: FutureBuilder<ui.Image>(
+                              future: cutoutImage,
+                              builder: (context, snapshot) {
+                                if (!snapshot.hasData) {
+                                  return const Center(
+                                    child: CircularProgressIndicator(),
+                                  );
+                                }
+                                return CustomPaint(
+                                  painter: CanvasPainter(
+                                    image: snapshot.data!,
+                                    settings: settings,
+                                    showGuides: showGuides,
+                                  ),
+                                  size: canvasSize,
+                                );
+                              },
                             ),
                           );
                         },
@@ -781,22 +775,13 @@ jobs:
                       child: const Row(
                         mainAxisAlignment: MainAxisAlignment.spaceEvenly,
                         children: [
-                          BottomTool(
-                            icon: Icons.crop_square,
-                            label: 'Canvas',
-                          ),
+                          BottomTool(icon: Icons.crop_square, label: 'Canvas'),
                           BottomTool(
                             icon: Icons.format_paint,
                             label: 'Background',
                           ),
-                          BottomTool(
-                            icon: Icons.tune,
-                            label: 'Adjust',
-                          ),
-                          BottomTool(
-                            icon: Icons.text_fields,
-                            label: 'Text',
-                          ),
+                          BottomTool(icon: Icons.tune, label: 'Adjust'),
+                          BottomTool(icon: Icons.text_fields, label: 'Text'),
                         ],
                       ),
                     ),
@@ -806,13 +791,17 @@ jobs:
             }
           }
 
+          Future<ui.Image> decodeImageFromList(Uint8List bytes) {
+            return ui.decodeImageFromList(bytes);
+          }
+
           class CanvasPainter extends CustomPainter {
-            final Uint8List cutoutBytes;
+            final ui.Image image;
             final EditorSettings settings;
             final bool showGuides;
 
             CanvasPainter({
-              required this.cutoutBytes,
+              required this.image,
               required this.settings,
               required this.showGuides,
             });
@@ -823,17 +812,12 @@ jobs:
 
               for (double y = 0; y < size.height; y += square) {
                 for (double x = 0; x < size.width; x += square) {
-                  final int row =
-                      (y / square).floor();
-                  final int column =
-                      (x / square).floor();
-                  final bool isDark =
-                      (row + column).isEven;
-
+                  final bool dark =
+                      ((x / square).floor() + (y / square).floor()).isEven;
                   canvas.drawRect(
                     Rect.fromLTWH(x, y, square, square),
                     Paint()
-                      ..color = isDark
+                      ..color = dark
                           ? const Color(0xFF1F2028)
                           : const Color(0xFF272932),
                   );
@@ -844,7 +828,6 @@ jobs:
                 final guidePaint = Paint()
                   ..color = const Color(0xFF4DA3FF)
                   ..strokeWidth = 1.5;
-
                 canvas.drawLine(
                   Offset(size.width / 2, 0),
                   Offset(size.width / 2, size.height),
@@ -857,54 +840,46 @@ jobs:
                 );
               }
 
-              decodeImageFromList(cutoutBytes).then((image) {
-                final double imageWidth;
-                final double imageHeight;
+              final double imageWidth;
+              final double imageHeight;
+              if (image.width > image.height) {
+                imageWidth = size.width * 0.72 * settings.scale;
+                imageHeight = imageWidth * image.height / image.width;
+              } else {
+                imageHeight = size.height * 0.72 * settings.scale;
+                imageWidth = imageHeight * image.width / image.height;
+              }
 
-                if (image.width > image.height) {
-                  imageWidth = size.width * 0.72 * settings.scale;
-                  imageHeight = imageWidth *
-                      image.height /
-                      image.width;
-                } else {
-                  imageHeight = size.height * 0.72 * settings.scale;
-                  imageWidth = imageHeight *
-                      image.width /
-                      image.height;
-                }
-
-                canvas.save();
-                canvas.translate(
-                  size.width / 2 + settings.position.dx,
-                  size.height / 2 + settings.position.dy,
-                );
-                canvas.rotate(settings.angle);
-
-                canvas.drawImageRect(
-                  image,
-                  Rect.fromLTWH(
-                    0,
-                    0,
-                    image.width.toDouble(),
-                    image.height.toDouble(),
-                  ),
-                  Rect.fromLTWH(
-                    -imageWidth / 2,
-                    -imageHeight / 2,
-                    imageWidth,
-                    imageHeight,
-                  ),
-                  Paint(),
-                );
-                canvas.restore();
-              });
+              canvas.save();
+              canvas.translate(
+                size.width / 2 + settings.position.dx,
+                size.height / 2 + settings.position.dy,
+              );
+              canvas.rotate(settings.angle);
+              canvas.drawImageRect(
+                image,
+                Rect.fromLTWH(
+                  0,
+                  0,
+                  image.width.toDouble(),
+                  image.height.toDouble(),
+                ),
+                Rect.fromLTWH(
+                  -imageWidth / 2,
+                  -imageHeight / 2,
+                  imageWidth,
+                  imageHeight,
+                ),
+                Paint(),
+              );
+              canvas.restore();
             }
 
             @override
             bool shouldRepaint(covariant CanvasPainter oldDelegate) {
               return oldDelegate.settings != settings ||
                   oldDelegate.showGuides != showGuides ||
-                  oldDelegate.cutoutBytes != cutoutBytes;
+                  oldDelegate.image != image;
             }
           }
 
@@ -913,41 +888,48 @@ jobs:
             final String label;
 
             const BottomTool({
-            super.key,
-            required this.icon,
-            required this.label,
-          });
+              super.key,
+              required this.icon,
+              required this.label,
+            });
 
-          @override
-          Widget build(BuildContext context) {
-            return Column(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                Icon(icon, color: Colors.white70),
-                const SizedBox(height: 6),
-                Text(
-                  label,
-                  style: const TextStyle(
-                    fontSize: 12,
-                    color: Colors.white70,
+            @override
+            Widget build(BuildContext context) {
+              return Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  Icon(icon, color: Colors.white70),
+                  const SizedBox(height: 6),
+                  Text(
+                    label,
+                    style: const TextStyle(
+                      fontSize: 12,
+                      color: Colors.white70,
+                    ),
                   ),
-                ),
-              ],
-            );
-          }
+                ],
+              );
+            }
           }
           EOF
 
       - name: Configure Android SDK level 34
         run: |
-          sed -i 's/compileSdk = flutter.compileSdkVersion/compileSdk = 34/g' android/app/build.gradle.kts
-          sed -i 's/targetSdk = flutter.targetSdkVersion/targetSdk = 34/g' android/app/build.gradle.kts
-          sed -i 's/minSdk = flutter.minSdkVersion/minSdk = 21/g' android/app/build.gradle.kts
-          sed -i 's/javaVersion = JavaVersion.VERSION_11/javaVersion = JavaVersion.VERSION_17/g' android/app/build.gradle.kts
-          sed -i 's/jvmTarget = JavaVersion.VERSION_11.toString()/jvmTarget = JavaVersion.VERSION_17.toString()/g' android/app/build.gradle.kts
-          sed -i 's/compileSdk flutter.compileSdkVersion/compileSdk 34/g' android/app/build.gradle || true
-          sed -i 's/targetSdk flutter.targetSdkVersion/targetSdk 34/g' android/app/build.gradle || true
-          sed -i 's/minSdk flutter.minSdkVersion/minSdk 21/g' android/app/build.gradle || true
+          if [ -f android/app/build.gradle.kts ]; then
+            sed -i \
+              -e 's/compileSdk = flutter.compileSdkVersion/compileSdk = 34/' \
+              -e 's/targetSdk = flutter.targetSdkVersion/targetSdk = 34/' \
+              -e 's/minSdk = flutter.minSdkVersion/minSdk = 21/' \
+              -e 's/JavaVersion.VERSION_11/JavaVersion.VERSION_17/g' \
+              android/app/build.gradle.kts
+          elif [ -f android/app/build.gradle ]; then
+            sed -i \
+              -e 's/compileSdk flutter.compileSdkVersion/compileSdk 34/' \
+              -e 's/targetSdk flutter.targetSdkVersion/targetSdk 34/' \
+              -e 's/minSdk flutter.minSdkVersion/minSdk 21/' \
+              -e 's/JavaVersion.VERSION_11/JavaVersion.VERSION_17/g' \
+              android/app/build.gradle
+          fi
 
       - name: Install dependencies
         run: flutter pub get
