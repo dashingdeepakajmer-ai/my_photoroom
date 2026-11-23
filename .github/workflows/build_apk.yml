@@ -938,6 +938,9 @@ jobs:
       - name: Install dependencies
         run: flutter pub get
       - name: Disable Lint Bug
+      - name: Disable R8 Minification
+        run: sed -i 's/isMinifyEnabled = true/isMinifyEnabled = false/g; s/isShrinkResources = true/isShrinkResources = false/g' android/app/build.gradle.kts && echo -e "\nandroid { buildTypes { getByName(\"release\") { isMinifyEnabled = false; isShrinkResources = false } } }" >> android/app/build.gradle.kts
+
         run: echo -e "\nandroid { lint { checkReleaseBuilds = false; abortOnError = false } }" >> android/app/build.gradle.kts
 
    
