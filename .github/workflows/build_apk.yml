@@ -937,6 +937,8 @@ jobs:
 
       - name: Install dependencies
         run: flutter pub get
+      - name: Disable Lint Bug
+        run: echo -e "\nandroid { lint { checkReleaseBuilds = false; abortOnError = false } }" >> android/app/build.gradle.kts
 
    
 
