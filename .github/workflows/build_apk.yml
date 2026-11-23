@@ -171,7 +171,7 @@ jobs:
               setState(() => processing = true);
 
               final segmenter = SubjectSegmenter(
-                options: SubjectSegmenterOptions(enableForegroundBitmap: true,
+                options: SubjectSegmenterOptions(enableForegroundBitmap: true,enableForegroundConfidenceMask: true,
                   enableMultipleSubjects: false,
                 ),
               );
