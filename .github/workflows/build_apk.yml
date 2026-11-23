@@ -172,7 +172,8 @@ jobs:
 
               final segmenter = SubjectSegmenter(
                 options: SubjectSegmenterOptions(enableForegroundBitmap: true,enableForegroundConfidenceMask: true,
-                  enableMultipleSubjects: false,
+                  enableMultipleSubjects: SubjectResultOptions(enableConfidenceMask: false, enableSubjectBitmap: false)
+
                 ),
               );
 
