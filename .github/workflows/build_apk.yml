@@ -227,7 +227,7 @@ jobs:
 
                 for (int y = 0; y < decoded.height; y++) {
                   for (int x = 0; x < decoded.width; x++) {
-                    final confidence = mask.get(x, y).clamp(0.0, 1.0);
+                  final confidence = mask[y * width + x].clamp(0.0, 1.0);
                     final pixel = decoded.getPixel(x, y);
                     output.setPixelRgba(
                       x,
@@ -243,7 +243,7 @@ jobs:
                 return Uint8List.fromList(img.encodePng(output));
               }
 
-              final bitmap = await result.getForegroundBitmap();
+            final bitmap = result.foregroundBitmap;
               if (bitmap == null) {
                 throw Exception('No foreground bitmap was produced');
               }
@@ -791,8 +791,11 @@ jobs:
             }
           }
 
-          Future<ui.Image> decodeImageFromList(Uint8List bytes) {
-            return ui.decodeImageFromList(bytes);
+          Future<ui.Image> decodeImageFromList(Uint8List bytes) async {
+          final codec = await ui.instantiateImageCodec(bytes);
+final frame = await codec.getNextFrame();
+return frame.image;
+
           }
 
           class CanvasPainter extends CustomPainter {
