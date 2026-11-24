@@ -32,7 +32,7 @@ jobs:
         run: rm -f test/widget_test.dart
 
       - name: Download RMBG-1.4 model
-        run: mkdir -p assets/models && curl -L -o assets/models/rmbg.onnx https://huggingface.co/briaai/RMBG-1.4/resolve/main/onnx/model_quantized.onnx
+        run: mkdir -p assets/models && curl -L -o assets/models/rmbg.onnx https://huggingface.co/Xenova/RMBG-1.4/resolve/main/onnx/model_quantized.onnx
 
       - name: Write pubspec.yaml
         run: |
