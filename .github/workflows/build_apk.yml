@@ -10,7 +10,6 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
-
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -20,25 +19,26 @@ jobs:
         with:
           distribution: temurin
           java-version: "17"
-        
 
       - name: Set up Flutter
         uses: subosito/flutter-action@v2
         with:
           channel: stable
-          cache: true
 
       - name: Create Flutter project
-        run: flutter create --platforms android --org com.example .
+        run: flutter create --platforms android --org com.mystudio --project-name my_photoroom .
 
       - name: Remove generated sample test
         run: rm -f test/widget_test.dart
 
+      - name: Download RMBG-1.4 model
+        run: mkdir -p assets/models && curl -L -o assets/models/rmbg.onnx https://huggingface.co/briaai/RMBG-1.4/resolve/main/onnx/model_quantized.onnx
+
       - name: Write pubspec.yaml
         run: |
-          cat << 'EOF' > pubspec.yaml
+          cat <<'EOF' > pubspec.yaml
           name: my_photoroom
-          description: Photoroom-like Phase 1 Flutter Android app
+          description: Offline batch product photo studio powered by RMBG-1.4.
           publish_to: "none"
           version: 1.0.0+1
 
@@ -48,12 +48,12 @@ jobs:
           dependencies:
             flutter:
               sdk: flutter
-            cupertino_icons: ^1.0.8
+            flutter_onnxruntime: ^1.9.0
             image_picker: ^1.1.2
-            google_mlkit_subject_segmentation: ^0.0.2
-            gal: ^2.3.0
             image: ^4.3.0
+            gal: ^2.3.0
             path_provider: ^2.1.4
+            shared_preferences: ^2.3.3
 
           dev_dependencies:
             flutter_test:
@@ -62,20 +62,20 @@ jobs:
 
           flutter:
             uses-material-design: true
+            assets:
+              - assets/models/rmbg.onnx
           EOF
 
       - name: Write Android manifest
         run: |
-          cat << 'EOF' > android/app/src/main/AndroidManifest.xml
+          cat <<'EOF' > android/app/src/main/AndroidManifest.xml
           <manifest xmlns:android="http://schemas.android.com/apk/res/android">
               <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
-              <uses-permission
-                  android:name="android.permission.READ_EXTERNAL_STORAGE"
-                  android:maxSdkVersion="32" />
+              <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32" />
 
               <application
                   android:name="${applicationName}"
-                  android:label="My PhotoRoom"
+                  android:label="My PhotoRoom Studio"
                   android:icon="@mipmap/ic_launcher">
                   <activity
                       android:name=".MainActivity"
@@ -86,865 +86,1091 @@ jobs:
                       android:configChanges="orientation|keyboardHidden|keyboard|screenSize|smallestScreenSize|locale|layoutDirection|fontScale|screenLayout|density|uiMode"
                       android:hardwareAccelerated="true"
                       android:windowSoftInputMode="adjustResize">
-                      <meta-data
-                          android:name="io.flutter.embedding.android.NormalTheme"
-                          android:resource="@style/NormalTheme" />
+                      <meta-data android:name="io.flutter.embedding.android.NormalTheme" android:resource="@style/NormalTheme" />
                       <intent-filter>
                           <action android:name="android.intent.action.MAIN" />
                           <category android:name="android.intent.category.LAUNCHER" />
                       </intent-filter>
                   </activity>
-                  <meta-data
-                      android:name="flutterEmbedding"
-                      android:value="2" />
+                  <meta-data android:name="flutterEmbedding" android:value="2" />
               </application>
           </manifest>
           EOF
 
-      - name: Write lib/main.dart
+      - name: Write batch studio app
         run: |
           mkdir -p lib
-          cat << 'EOF' > lib/main.dart
+          cat <<'EOF' > lib/main.dart
           import 'dart:io';
+          import 'dart:math' as math;
           import 'dart:typed_data';
-          import 'dart:ui' as ui;
 
           import 'package:flutter/material.dart';
-          import 'package:flutter/services.dart';
+          import 'package:flutter_onnxruntime/flutter_onnxruntime.dart';
           import 'package:gal/gal.dart';
-          import 'package:google_mlkit_subject_segmentation/google_mlkit_subject_segmentation.dart';
           import 'package:image/image.dart' as img;
           import 'package:image_picker/image_picker.dart';
           import 'package:path_provider/path_provider.dart';
+          import 'package:shared_preferences/shared_preferences.dart';
 
           void main() {
             WidgetsFlutterBinding.ensureInitialized();
-            SystemChrome.setSystemUIOverlayStyle(
-              const SystemUiOverlayStyle(
-                statusBarColor: Colors.transparent,
-                statusBarIconBrightness: Brightness.light,
-              ),
-            );
-            runApp(const PhotoRoomApp());
+            runApp(const PhotoStudioApp());
           }
 
-          class PhotoRoomApp extends StatelessWidget {
-            const PhotoRoomApp({super.key});
+          enum StudioBackground { auto, coolSlate, warmAlabaster, softStone }
+          enum LogoCorner { topLeft, topRight, bottomLeft, bottomRight }
 
-            @override
-            Widget build(BuildContext context) {
-              return MaterialApp(
-                title: 'My PhotoRoom',
-                debugShowCheckedModeBanner: false,
-                theme: ThemeData(
-                  useMaterial3: true,
-                  brightness: Brightness.dark,
-                  scaffoldBackgroundColor: const Color(0xFF111218),
-                  colorScheme: const ColorScheme.dark(
-                    primary: Color(0xFF7557FF),
-                    secondary: Color(0xFF3B82F6),
-                    surface: Color(0xFF1A1C24),
-                  ),
-                ),
-                home: const HomeScreen(),
-              );
-            }
+          class Palette {
+            const Palette(this.top, this.bottom, this.name);
+            final Color top;
+            final Color bottom;
+            final String name;
           }
 
-          class HomeScreen extends StatefulWidget {
-            const HomeScreen({super.key});
+          const _palettes = <StudioBackground, Palette>{
+            StudioBackground.coolSlate: Palette(
+              Color(0xFF2C3038),
+              Color(0xFF3E4450),
+              'Cool Slate',
+            ),
+            StudioBackground.warmAlabaster: Palette(
+              Color(0xFFF4F1EA),
+              Color(0xFFE5E0D5),
+              'Warm Alabaster',
+            ),
+            StudioBackground.softStone: Palette(
+              Color(0xFFE6E8EC),
+              Color(0xFFD5D9E0),
+              'Soft Stone',
+            ),
+          };
 
-            @override
-            State<HomeScreen> createState() => _HomeScreenState();
-          }
-
-          class _HomeScreenState extends State<HomeScreen> {
-            bool processing = false;
-
-            Future<void> pickAndProcess() async {
-              final file = await ImagePicker().pickImage(
-                source: ImageSource.gallery,
-                imageQuality: 100,
-              );
-              if (file == null || !mounted) return;
-
-              setState(() => processing = true);
-
-              final segmenter = SubjectSegmenter(
-                options: SubjectSegmenterOptions(enableForegroundBitmap: true,enableForegroundConfidenceMask: true,
-                  enableMultipleSubjects: SubjectResultOptions(enableConfidenceMask: false, enableSubjectBitmap: false)
-
-                ),
-              );
-
-              try {
-                final SubjectSegmentationResult? result =
-                    await segmenter.processImage(
-                  InputImage.fromFilePath(file.path),
-                );
-
-                if (result == null) {
-                  throw Exception('Subject segmentation returned no result');
-                }
-
-                final cutout = await createCutout(file.path, result);
-
-                if (!mounted) return;
-                await Navigator.of(context).push(
-                  MaterialPageRoute<void>(
-                    builder: (_) => EditorScreen(cutoutBytes: cutout),
-                  ),
-                );
-              } catch (error) {
-                if (!mounted) return;
-                ScaffoldMessenger.of(context).showSnackBar(
-                  SnackBar(
-                    content: Text('Background removal failed: $error'),
-                  ),
-                );
-              } finally {
-                await segmenter.close();
-                if (mounted) setState(() => processing = false);
-              }
-            }
-
-            Future<Uint8List> createCutout(
-              String sourcePath,
-              SubjectSegmentationResult result,
-            ) async {
-              final sourceBytes = await File(sourcePath).readAsBytes();
-              final decoded = img.decodeImage(sourceBytes);
-              if (decoded == null) {
-                throw Exception('Unable to decode the selected image');
-              }
-
-              final mask = result.foregroundConfidenceMask;
-              if (mask != null) {
-                final output = img.Image(
-                  width: decoded.width,
-                  height: decoded.height,
-                  numChannels: 4,
-                );
-
-                for (int y = 0; y < decoded.height; y++) {
-                  for (int x = 0; x < decoded.width; x++) {final width = decoded.width;
-                  final double confidence = mask[y * width + x].clamp(0.0, 1.0);
-                    final pixel = decoded.getPixel(x, y);
-                    output.setPixelRgba(
-                      x,
-                      y,
-                      pixel.r.toInt(),
-                      pixel.g.toInt(),
-                      pixel.b.toInt(),
-                      (confidence * 255).round(),
-                    );
-                  }
-                }
-
-                return Uint8List.fromList(img.encodePng(output));
-              }
-
-            final bitmap = result.foregroundBitmap;
-              if (bitmap == null) {
-                throw Exception('No foreground bitmap was produced');
-              }
-              return Uint8List.fromList(bitmap);
-            }
-
-            @override
-            Widget build(BuildContext context) {
-              return Scaffold(
-                body: SafeArea(
-                  child: Stack(
-                    children: [
-                      SingleChildScrollView(
-                        padding: const EdgeInsets.fromLTRB(20, 18, 20, 32),
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Row(
-                              children: [
-                                Container(
-                                  width: 42,
-                                  height: 42,
-                                  decoration: BoxDecoration(
-                                    gradient: const LinearGradient(
-                                      colors: [
-                                        Color(0xFF9B5CF6),
-                                        Color(0xFF5B79FF),
-                                      ],
-                                    ),
-                                    borderRadius: BorderRadius.circular(12),
-                                  ),
-                                  child: const Icon(
-                                    Icons.auto_awesome,
-                                    color: Colors.white,
-                                  ),
-                                ),
-                                const SizedBox(width: 12),
-                                const Text(
-                                  'My PhotoRoom',
-                                  style: TextStyle(
-                                    fontSize: 22,
-                                    fontWeight: FontWeight.w800,
-                                  ),
-                                ),
-                              ],
-                            ),
-                            const SizedBox(height: 28),
-                            const Text(
-                              'Create in seconds',
-                              style: TextStyle(
-                                fontSize: 30,
-                                fontWeight: FontWeight.w900,
-                              ),
-                            ),
-                            const SizedBox(height: 8),
-                            Text(
-                              'Remove backgrounds and create clean product photos.',
-                              style: TextStyle(
-                                color: Colors.white.withValues(alpha: 0.62),
-                              ),
-                            ),
-                            const SizedBox(height: 24),
-                            SizedBox(
-                              height: 72,
-                              width: double.infinity,
-                              child: FilledButton.icon(
-                                onPressed: processing ? null : pickAndProcess,
-                                icon: const Icon(
-                                  Icons.add_photo_alternate_rounded,
-                                  size: 26,
-                                ),
-                                label: const Text(
-                                  'Start from Photo',
-                                  style: TextStyle(
-                                    fontSize: 18,
-                                    fontWeight: FontWeight.w800,
-                                  ),
-                                ),
-                                style: FilledButton.styleFrom(
-                                  backgroundColor: const Color(0xFF7557FF),
-                                  shape: RoundedRectangleBorder(
-                                    borderRadius: BorderRadius.circular(18),
-                                  ),
-                                ),
-                              ),
-                            ),
-                            const SizedBox(height: 28),
-                            const Text(
-                              'Quick start',
-                              style: TextStyle(
-                                fontSize: 17,
-                                fontWeight: FontWeight.w800,
-                              ),
-                            ),
-                            const SizedBox(height: 14),
-                            GridView.count(
-                              shrinkWrap: true,
-                              physics: const NeverScrollableScrollPhysics(),
-                              crossAxisCount: 2,
-                              mainAxisSpacing: 12,
-                              crossAxisSpacing: 12,
-                              childAspectRatio: 1.35,
-                              children: const [
-                                QuickCard(
-                                  title: 'Transparent',
-                                  icon: Icons.grid_on,
-                                  preview: Colors.transparent,
-                                ),
-                                QuickCard(
-                                  title: 'White BG',
-                                  icon: Icons.circle,
-                                  preview: Colors.white,
-                                ),
-                                QuickCard(
-                                  title: 'Black BG',
-                                  icon: Icons.dark_mode,
-                                  preview: Color(0xFF171717),
-                                ),
-                                QuickCard(
-                                  title: 'Square 1:1',
-                                  icon: Icons.crop_square,
-                                  preview: Color(0xFF32374A),
-                                ),
-                              ],
-                            ),
-                          ],
-                        ),
-                      ),
-                      if (processing)
-                        Container(
-                          color: const Color(0xCC111218),
-                          child: const Center(
-                            child: Column(
-                              mainAxisSize: MainAxisSize.min,
-                              children: [
-                                ScanningGlow(),
-                                SizedBox(height: 18),
-                                Text(
-                                  'Removing background...',
-                                  style: TextStyle(
-                                    fontSize: 17,
-                                    fontWeight: FontWeight.w800,
-                                  ),
-                                ),
-                              ],
-                            ),
-                          ),
-                        ),
-                    ],
-                  ),
-                ),
-              );
-            }
-          }
-
-          class QuickCard extends StatelessWidget {
-            final String title;
-            final IconData icon;
-            final Color preview;
-
-            const QuickCard({
-              super.key,
-              required this.title,
-              required this.icon,
-              required this.preview,
+          class ProductPhoto {
+            ProductPhoto({
+              required this.name,
+              required this.source,
+              required this.mask,
+              required this.background,
             });
 
+            final String name;
+            final img.Image source;
+            final img.Image mask;
+            StudioBackground background;
+            Uint8List? preview;
+          }
+
+          class PhotoStudioApp extends StatelessWidget {
+            const PhotoStudioApp({super.key});
+
             @override
-            Widget build(BuildContext context) {
-              return InkWell(
-                onTap: () {
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    SnackBar(content: Text('$title selected')),
-                  );
-                },
-                borderRadius: BorderRadius.circular(16),
-                child: Ink(
-                  decoration: BoxDecoration(
-                    color: const Color(0xFF1C1E27),
-                    borderRadius: BorderRadius.circular(16),
-                    border: Border.all(color: Colors.white10),
-                  ),
-                  child: Stack(
-                    children: [
-                      Positioned(
-                        right: 12,
-                        top: 12,
-                        child: Container(
-                          width: 54,
-                          height: 54,
-                          decoration: BoxDecoration(
-                            color: preview == Colors.transparent
-                                ? Colors.black26
-                                : preview,
-                            borderRadius: BorderRadius.circular(10),
-                            border: Border.all(color: Colors.white24),
-                          ),
-                        ),
-                      ),
-                      Positioned(
-                        left: 14,
-                        bottom: 14,
-                        child: Row(
-                          children: [
-                            Icon(icon, size: 18, color: Colors.white70),
-                            const SizedBox(width: 7),
-                            Text(
-                              title,
-                              style: const TextStyle(
-                                fontWeight: FontWeight.w700,
-                              ),
-                            ),
-                          ],
-                        ),
-                      ),
-                    ],
-                  ),
+            Widget build(BuildContext context) => MaterialApp(
+              title: 'My PhotoRoom Studio',
+              debugShowCheckedModeBanner: false,
+              theme: ThemeData(
+                colorScheme: ColorScheme.fromSeed(
+                  seedColor: const Color(0xFF7157E8),
+                  brightness: Brightness.dark,
                 ),
-              );
-            }
+                useMaterial3: true,
+              ),
+              home: const StudioHome(),
+            );
           }
 
-          class ScanningGlow extends StatefulWidget {
-            const ScanningGlow({super.key});
+          class StudioHome extends StatefulWidget {
+            const StudioHome({super.key});
 
             @override
-            State<ScanningGlow> createState() => _ScanningGlowState();
+            State<StudioHome> createState() => _StudioHomeState();
           }
 
-          class _ScanningGlowState extends State<ScanningGlow>
-              with SingleTickerProviderStateMixin {
-            late final AnimationController controller;
+          class _StudioHomeState extends State<StudioHome> {
+            final _picker = ImagePicker();
+            final _runtime = OnnxRuntime();
+            final _photos = <ProductPhoto>[];
+            OrtSession? _session;
+            String? _logoPath;
+            LogoCorner _corner = LogoCorner.bottomRight;
+            double _logoSize = 0.16;
+            bool _working = false;
+            String _status = 'Choose product photos to begin';
+            int _currentPage = 0;
 
             @override
             void initState() {
               super.initState();
-              controller = AnimationController(
-                vsync: this,
-                duration: const Duration(milliseconds: 1400),
-              )..repeat(reverse: true);
+              _loadLogoSettings();
+            }
+
+            Future<void> _loadLogoSettings() async {
+              final prefs = await SharedPreferences.getInstance();
+              final savedPath = prefs.getString('brandLogoPath');
+              if (savedPath != null && await File(savedPath).exists()) {
+                _logoPath = savedPath;
+              }
+
+              final cornerName = prefs.getString('brandLogoCorner');
+              if (cornerName != null) {
+                _corner = LogoCorner.values.firstWhere(
+                  (value) => value.name == cornerName,
+                  orElse: () => LogoCorner.bottomRight,
+                );
+              }
+
+              _logoSize = prefs.getDouble('brandLogoSize') ?? 0.16;
+              if (mounted) setState(() {});
+            }
+
+            Future<void> _pickLogo() async {
+              final picked = await _picker.pickImage(
+                source: ImageSource.gallery,
+                imageQuality: 100,
+              );
+              if (picked == null) return;
+
+              if (!picked.path.toLowerCase().endsWith('.png')) {
+                _message('Please choose a PNG brand logo.');
+                return;
+              }
+
+              final bytes = await File(picked.path).readAsBytes();
+              final decoded = img.decodePng(bytes);
+              if (decoded == null) {
+                _message('Please choose a valid PNG brand logo.');
+                return;
+              }
+
+              final directory = await getApplicationDocumentsDirectory();
+              final saved = await File(
+                '${directory.path}/brand_logo.png',
+              ).writeAsBytes(bytes);
+
+              final prefs = await SharedPreferences.getInstance();
+              await prefs.setString('brandLogoPath', saved.path);
+
+              setState(() => _logoPath = saved.path);
+              await _rerenderAll();
+            }
+
+            Future<void> _saveLogoSettings() async {
+              final prefs = await SharedPreferences.getInstance();
+              await prefs.setString('brandLogoCorner', _corner.name);
+              await prefs.setDouble('brandLogoSize', _logoSize);
+            }
+
+            Future<OrtSession> _getSession() async {
+              return _session ??= await _runtime.createSessionFromAsset(
+                'assets/models/rmbg.onnx',
+              );
+            }
+
+            Future<void> _selectBatch() async {
+              final files = await _picker.pickMultiImage(imageQuality: 100);
+              if (files.isEmpty || !mounted) return;
+
+              setState(() {
+                _working = true;
+                _status = 'Loading RMBG-1.4…';
+              });
+
+              try {
+                final session = await _getSession();
+
+                for (var index = 0; index < files.length; index++) {
+                  if (!mounted) return;
+
+                  setState(() {
+                    _status = 'Processing ${index + 1} of ${files.length}…';
+                  });
+
+                  final bytes = await File(files[index].path).readAsBytes();
+                  final source = img.decodeImage(bytes);
+                  if (source == null) {
+                    throw StateError(
+                      'Could not decode ${files[index].name}',
+                    );
+                  }
+
+                  final mask = await _inferMask(session, source);
+                  final photo = ProductPhoto(
+                    name: files[index].name,
+                    source: source,
+                    mask: mask,
+                    background: _autoBackground(source, mask),
+                  );
+
+                  photo.preview = await _render(photo);
+                  _photos.add(photo);
+
+                  if (mounted) setState(() {});
+                }
+
+                if (_photos.isNotEmpty) {
+                  _currentPage = _photos.length - 1;
+                }
+              } catch (error) {
+                _message('Batch processing failed: $error');
+              } finally {
+                if (mounted) {
+                  setState(() {
+                    _working = false;
+                    _status = _photos.isEmpty
+                        ? 'Choose product photos to begin'
+                        : '${_photos.length} product photo(s) ready';
+                  });
+                }
+              }
+            }
+
+            Future<img.Image> _inferMask(
+              OrtSession session,
+              img.Image source,
+            ) async {
+              const side = 1024;
+
+              final resized = img.copyResize(
+                source,
+                width: side,
+                height: side,
+                interpolation: img.Interpolation.linear,
+              );
+
+              final plane = side * side;
+              final inputData = Float32List(3 * plane);
+
+              for (var y = 0; y < side; y++) {
+                for (var x = 0; x < side; x++) {
+                  final pixel = resized.getPixel(x, y);
+                  final offset = y * side + x;
+                  inputData[offset] =
+                      (pixel.r.toDouble() / 255.0 - 0.5) / 1.0;
+                  inputData[plane + offset] =
+                      (pixel.g.toDouble() / 255.0 - 0.5) / 1.0;
+                  inputData[2 * plane + offset] =
+                      (pixel.b.toDouble() / 255.0 - 0.5) / 1.0;
+                }
+              }
+
+              final input = await OrtValue.fromList(
+                inputData,
+                const [1, 3, side, side],
+              );
+
+              Map<String, OrtValue> outputs = {};
+
+              try {
+                outputs = await session.run({
+                  session.inputNames.first: input,
+                });
+
+                if (outputs.isEmpty) {
+                  throw StateError('RMBG-1.4 returned no mask output');
+                }
+
+                final output = outputs[session.outputNames.first];
+                if (output == null) {
+                  throw StateError(
+                    'RMBG-1.4 mask output is missing',
+                  );
+                }
+
+                final values = await output.asFlattenedList();
+                if (values.length < plane) {
+                  throw StateError(
+                    'RMBG-1.4 mask has ${values.length} values; '
+                    'expected at least $plane',
+                  );
+                }
+
+                final maskSmall = img.Image(
+                  width: side,
+                  height: side,
+                  numChannels: 1,
+                );
+
+                for (var y = 0; y < side; y++) {
+                  for (var x = 0; x < side; x++) {
+                    final raw =
+                        (values[y * side + x] as num).toDouble();
+                    final alpha = raw.isFinite
+                        ? (raw < 0 || raw > 1
+                            ? 1 / (1 + math.exp(-raw))
+                            : raw)
+                        : 0.0;
+                    final level =
+                        (alpha.clamp(0.0, 1.0) * 255).round();
+                    maskSmall.setPixelRgba(
+                      x,
+                      y,
+                      level,
+                      level,
+                      level,
+                      255,
+                    );
+                  }
+                }
+
+                return img.copyResize(
+                  maskSmall,
+                  width: source.width,
+                  height: source.height,
+                  interpolation: img.Interpolation.linear,
+                );
+              } finally {
+                await input.dispose();
+                for (final value in outputs.values) {
+                  await value.dispose();
+                }
+              }
+            }
+
+            StudioBackground _autoBackground(
+              img.Image source,
+              img.Image mask,
+            ) {
+              var luminance = 0.0;
+              var saturation = 0.0;
+              var count = 0;
+              final step = math.max(
+                1,
+                (source.width * source.height) ~/ 50000,
+              );
+              var index = 0;
+
+              for (var y = 0; y < source.height; y++) {
+                for (var x = 0; x < source.width; x++, index++) {
+                  if (index % step != 0 ||
+                      mask.getPixel(x, y).r < 128) {
+                    continue;
+                  }
+
+                  final p = source.getPixel(x, y);
+                  final r = p.r.toDouble() / 255;
+                  final g = p.g.toDouble() / 255;
+                  final b = p.b.toDouble() / 255;
+
+                  luminance +=
+                      0.2126 * r + 0.7152 * g + 0.0722 * b;
+                  saturation +=
+                      math.max(r, math.max(g, b)) -
+                      math.min(r, math.min(g, b));
+                  count++;
+                }
+              }
+
+              if (count == 0) {
+                return StudioBackground.softStone;
+              }
+
+              final mean = luminance / count;
+              final meanSaturation = saturation / count;
+
+              if (meanSaturation > 0.28) {
+                return StudioBackground.softStone;
+              }
+              if (mean > 0.62) {
+                return StudioBackground.coolSlate;
+              }
+              if (mean < 0.32) {
+                return StudioBackground.warmAlabaster;
+              }
+              return StudioBackground.softStone;
+            }
+
+            Future<Uint8List> _render(ProductPhoto photo) async {
+              final source = photo.source;
+              final width = source.width;
+              final height = source.height;
+
+              final palette =
+                  _palettes[photo.background]!;
+
+              final result = img.Image(
+                width: width,
+                height: height,
+                numChannels: 4,
+              );
+
+              for (var y = 0; y < height; y++) {
+                final t =
+                    height <= 1 ? 0.0 : y / (height - 1);
+                for (var x = 0; x < width; x++) {
+                  final r = (palette.top.red * (1 - t) +
+                          palette.bottom.red * t)
+                      .round();
+                  final g = (palette.top.green * (1 - t) +
+                          palette.bottom.green * t)
+                      .round();
+                  final b = (palette.top.blue * (1 - t) +
+                          palette.bottom.blue * t)
+                      .round();
+                  result.setPixelRgba(x, y, r, g, b, 255);
+                }
+              }
+
+              var minX = width;
+              var maxX = 0;
+              var minY = height;
+              var maxY = 0;
+              var found = false;
+
+              for (var y = 0; y < height; y++) {
+                for (var x = 0; x < width; x++) {
+                  if (photo.mask.getPixel(x, y).r > 24) {
+                    found = true;
+                    minX = math.min(minX, x);
+                    maxX = math.max(maxX, x);
+                    minY = math.min(minY, y);
+                    maxY = math.max(maxY, y);
+                  }
+                }
+              }
+
+              if (found) {
+                final centerX = (minX + maxX) / 2.0;
+                final centerY =
+                    math.min(height - 1.0, maxY + (maxY - minY) * 0.035);
+                final radiusX =
+                    math.max(1.0, (maxX - minX) * 0.34);
+                final radiusY =
+                    math.max(1.0, (maxY - minY) * 0.055);
+
+                for (var y =
+                        math.max(
+                          0,
+                          (centerY - radiusY * 2.5).floor(),
+                        );
+                    y <
+                        math.min(
+                          height,
+                          (centerY + radiusY * 2.5).ceil(),
+                        );
+                    y++) {
+                  for (var x =
+                          math.max(
+                            0,
+                            (centerX - radiusX * 2.5).floor(),
+                          );
+                      x <
+                          math.min(
+                            width,
+                            (centerX + radiusX * 2.5).ceil(),
+                          );
+                      x++) {
+                    final d =
+                        math.pow((x - centerX) / radiusX, 2) +
+                        math.pow((y - centerY) / radiusY, 2);
+
+                    final alpha =
+                        (math.exp(-d * 1.8) * 0.24)
+                            .clamp(0.0, 0.24);
+
+                    if (alpha < 0.002) continue;
+
+                    final old = result.getPixel(x, y);
+                    result.setPixelRgba(
+                      x,
+                      y,
+                      (old.r * (1 - alpha)).round(),
+                      (old.g * (1 - alpha)).round(),
+                      (old.b * (1 - alpha)).round(),
+                      255,
+                    );
+                  }
+                }
+              }
+
+              for (var y = 0; y < height; y++) {
+                for (var x = 0; x < width; x++) {
+                  final alpha =
+                      (photo.mask.getPixel(x, y).r.toDouble() / 255)
+                          .clamp(0.0, 1.0);
+
+                  if (alpha <= 0) continue;
+
+                  final fg = source.getPixel(x, y);
+                  final bg = result.getPixel(x, y);
+
+                  result.setPixelRgba(
+                    x,
+                    y,
+                    (fg.r * alpha + bg.r * (1 - alpha)).round(),
+                    (fg.g * alpha + bg.g * (1 - alpha)).round(),
+                    (fg.b * alpha + bg.b * (1 - alpha)).round(),
+                    255,
+                  );
+                }
+              }
+
+              final logoPath = _logoPath;
+              if (logoPath != null && await File(logoPath).exists()) {
+                final logo = img.decodeImage(
+                  await File(logoPath).readAsBytes(),
+                );
+
+                if (logo != null) {
+                  final logoWidth =
+                      math.max((width * _logoSize).round(), 1);
+                  final resizedLogo = img.copyResize(
+                    logo,
+                    width: logoWidth,
+                    interpolation: img.Interpolation.linear,
+                  );
+
+                  final pad =
+                      math.max((width * 0.025).round(), 12);
+
+                  final left = _corner == LogoCorner.topLeft ||
+                          _corner == LogoCorner.bottomLeft
+                      ? pad
+                      : width - resizedLogo.width - pad;
+
+                  final top = _corner == LogoCorner.topLeft ||
+                          _corner == LogoCorner.topRight
+                      ? pad
+                      : height - resizedLogo.height - pad;
+
+                  for (var y = 0;
+                      y < resizedLogo.height;
+                      y++) {
+                    for (var x = 0;
+                        x < resizedLogo.width;
+                        x++) {
+                      final dx = left + x;
+                      final dy = top + y;
+
+                      if (dx < 0 ||
+                          dx >= width ||
+                          dy < 0 ||
+                          dy >= height) {
+                        continue;
+                      }
+
+                      final fg = resizedLogo.getPixel(x, y);
+                      final bg = result.getPixel(dx, dy);
+                      final a =
+                          (fg.a.toDouble() / 255)
+                              .clamp(0.0, 1.0);
+
+                      result.setPixelRgba(
+                        dx,
+                        dy,
+                        (fg.r * a + bg.r * (1 - a)).round(),
+                        (fg.g * a + bg.g * (1 - a)).round(),
+                        (fg.b * a + bg.b * (1 - a)).round(),
+                        255,
+                      );
+                    }
+                  }
+                }
+              }
+
+              return Uint8List.fromList(
+                img.encodePng(result, level: 6),
+              );
+            }
+
+            Future<void> _rerenderAll() async {
+              for (final photo in _photos) {
+                photo.preview = await _render(photo);
+              }
+              if (mounted) setState(() {});
+            }
+
+            Future<void> _changeBackground(
+              StudioBackground? value,
+            ) async {
+              if (value == null || _photos.isEmpty) return;
+
+              final photo = _photos[
+                  _currentPage.clamp(0, _photos.length - 1)];
+
+              setState(() {
+                photo.background =
+                    value == StudioBackground.auto
+                        ? _autoBackground(photo.source, photo.mask)
+                        : value;
+              });
+
+              photo.preview = await _render(photo);
+              if (mounted) setState(() {});
+            }
+
+            Future<void> _saveAll() async {
+              if (_photos.isEmpty) return;
+
+              setState(() {
+                _working = true;
+                _status =
+                    'Saving ${_photos.length} HD image(s)…';
+              });
+
+              try {
+                final directory =
+                    await getTemporaryDirectory();
+
+                for (var i = 0;
+                    i < _photos.length;
+                    i++) {
+                  final bytes =
+                      _photos[i].preview ??
+                      await _render(_photos[i]);
+
+                  final file = File(
+                    '${directory.path}/photoroom_'
+                    '${DateTime.now().millisecondsSinceEpoch}_$i.png',
+                  );
+
+                  await file.writeAsBytes(bytes, flush: true);
+                  await Gal.putImage(
+                    file.path,
+                    album: 'My PhotoRoom Studio',
+                  );
+                }
+
+                _message(
+                  'Saved all ${_photos.length} photos to your gallery.',
+                );
+              } catch (error) {
+                _message(
+                  'Could not save all photos: $error',
+                );
+              } finally {
+                if (mounted) {
+                  setState(() {
+                    _working = false;
+                    _status =
+                        '${_photos.length} product photo(s) ready';
+                  });
+                }
+              }
+            }
+
+            void _message(String message) {
+              if (mounted) {
+                ScaffoldMessenger.of(context).showSnackBar(
+                  SnackBar(content: Text(message)),
+                );
+              }
             }
 
             @override
             void dispose() {
-              controller.dispose();
+              _session?.close();
               super.dispose();
             }
 
             @override
             Widget build(BuildContext context) {
-              return AnimatedBuilder(
-                animation: controller,
-                builder: (_, __) => Container(
-                  width: 94,
-                  height: 94,
-                  decoration: BoxDecoration(
-                    shape: BoxShape.circle,
-                    border: Border.all(
-                      color: const Color(0xFF7F72FF),
-                      width: 3,
+              final current = _photos.isEmpty
+                  ? null
+                  : _photos[
+                      _currentPage.clamp(
+                        0,
+                        _photos.length - 1,
+                      )];
+
+              return Scaffold(
+                appBar: AppBar(
+                  title: const Text('Product Photo Studio'),
+                  actions: [
+                    IconButton(
+                      tooltip: 'Choose PNG brand logo',
+                      onPressed:
+                          _working ? null : _pickLogo,
+                      icon: const Icon(
+                        Icons.branding_watermark,
+                      ),
                     ),
-                    boxShadow: [
-                      BoxShadow(
-                        color: const Color(0xFF715EFF).withValues(
-                          alpha: 0.25 + controller.value * 0.55,
+                    if (_photos.isNotEmpty)
+                      IconButton(
+                        tooltip: 'Save all to gallery',
+                        onPressed:
+                            _working ? null : _saveAll,
+                        icon: const Icon(Icons.save_alt),
+                      ),
+                  ],
+                ),
+                body: SafeArea(
+                  child: Column(
+                    children: [
+                      Padding(
+                        padding: const EdgeInsets.fromLTRB(
+                          16,
+                          8,
+                          16,
+                          8,
                         ),
-                        blurRadius: 18 + controller.value * 18,
-                        spreadRadius: 4,
+                        child: Column(
+                          crossAxisAlignment:
+                              CrossAxisAlignment.stretch,
+                          children: [
+                            FilledButton.icon(
+                              onPressed:
+                                  _working ? null : _selectBatch,
+                              icon: const Icon(
+                                Icons.add_photo_alternate,
+                              ),
+                              label: const Text(
+                                '+ Select Product Photos (Batch)',
+                              ),
+                            ),
+                            const SizedBox(height: 8),
+                            Row(
+                              children: [
+                                Expanded(
+                                  child: Text(
+                                    _logoPath == null
+                                        ? 'Brand logo: not set'
+                                        : 'Brand logo: ready',
+                                    overflow:
+                                        TextOverflow.ellipsis,
+                                  ),
+                                ),
+                                DropdownButton<LogoCorner>(
+                                  value: _corner,
+                                  onChanged: _working
+                                      ? null
+                                      : (value) {
+                                          if (value == null) {
+                                            return;
+                                          }
+                                          setState(
+                                            () => _corner = value,
+                                          );
+                                          _saveLogoSettings();
+                                          _rerenderAll();
+                                        },
+                                  items: const [
+                                    DropdownMenuItem(
+                                      value: LogoCorner.topLeft,
+                                      child: Text('Top-Left'),
+                                    ),
+                                    DropdownMenuItem(
+                                      value: LogoCorner.topRight,
+                                      child: Text('Top-Right'),
+                                    ),
+                                    DropdownMenuItem(
+                                      value:
+                                          LogoCorner.bottomLeft,
+                                      child:
+                                          Text('Bottom-Left'),
+                                    ),
+                                    DropdownMenuItem(
+                                      value:
+                                          LogoCorner.bottomRight,
+                                      child:
+                                          Text('Bottom-Right'),
+                                    ),
+                                  ],
+                                ),
+                              ],
+                            ),
+                            Row(
+                              children: [
+                                const Text('Logo size'),
+                                Expanded(
+                                  child: Slider(
+                                    value: _logoSize,
+                                    min: 0.06,
+                                    max: 0.32,
+                                    onChanged: _working
+                                        ? null
+                                        : (v) {
+                                            setState(
+                                              () => _logoSize = v,
+                                            );
+                                            _saveLogoSettings();
+                                          },
+                                    onChangeEnd: (_) =>
+                                        _rerenderAll(),
+                                  ),
+                                ),
+                                Text(
+                                  '${(_logoSize * 100).round()}%',
+                                ),
+                              ],
+                            ),
+                          ],
+                        ),
+                      ),
+                      if (current != null)
+                        Padding(
+                          padding:
+                              const EdgeInsets.symmetric(
+                            horizontal: 16,
+                          ),
+                          child: Row(
+                            children: [
+                              Expanded(
+                                child: Text(
+                                  '${_currentPage + 1}/'
+                                  '${_photos.length}  •  '
+                                  '${current.name}',
+                                  maxLines: 1,
+                                  overflow:
+                                      TextOverflow.ellipsis,
+                                ),
+                              ),
+                              DropdownButton<StudioBackground>(
+                                value: current.background,
+                                onChanged: _working
+                                    ? null
+                                    : _changeBackground,
+                                items: const [
+                                  DropdownMenuItem(
+                                    value:
+                                        StudioBackground.auto,
+                                    child:
+                                        Text('Auto studio'),
+                                  ),
+                                  DropdownMenuItem(
+                                    value:
+                                        StudioBackground.coolSlate,
+                                    child:
+                                        Text('Cool Slate'),
+                                  ),
+                                  DropdownMenuItem(
+                                    value: StudioBackground
+                                        .warmAlabaster,
+                                    child: Text(
+                                      'Warm Alabaster',
+                                    ),
+                                  ),
+                                  DropdownMenuItem(
+                                    value:
+                                        StudioBackground.softStone,
+                                    child:
+                                        Text('Soft Stone'),
+                                  ),
+                                ],
+                              ),
+                            ],
+                          ),
+                        ),
+                      Expanded(
+                        child: current == null
+                            ? const Center(
+                                child: Text(
+                                  'Your processed product photos '
+                                  'will appear here.',
+                                ),
+                              )
+                            : PageView.builder(
+                                itemCount: _photos.length,
+                                onPageChanged: (index) {
+                                  setState(
+                                    () => _currentPage = index,
+                                  );
+                                },
+                                itemBuilder:
+                                    (context, index) {
+                                  final photo =
+                                      _photos[index];
+
+                                  return Padding(
+                                    padding:
+                                        const EdgeInsets.all(
+                                      16,
+                                    ),
+                                    child: Center(
+                                      child: photo.preview == null
+                                          ? const CircularProgressIndicator()
+                                          : ClipRRect(
+                                              borderRadius:
+                                                  BorderRadius.circular(
+                                                20,
+                                              ),
+                                              child:
+                                                  Image.memory(
+                                                photo.preview!,
+                                                fit: BoxFit.contain,
+                                                gaplessPlayback:
+                                                    true,
+                                              ),
+                                            ),
+                                    ),
+                                  );
+                                },
+                              ),
+                      ),
+                      Padding(
+                        padding:
+                            const EdgeInsets.fromLTRB(
+                          16,
+                          0,
+                          16,
+                          16,
+                        ),
+                        child: Column(
+                          children: [
+                            if (_working)
+                              const LinearProgressIndicator(),
+                            const SizedBox(height: 8),
+                            Text(
+                              _status,
+                              textAlign:
+                                  TextAlign.center,
+                            ),
+                            const SizedBox(height: 8),
+                            SizedBox(
+                              width: double.infinity,
+                              child: FilledButton.icon(
+                                onPressed: _working ||
+                                        _photos.isEmpty
+                                    ? null
+                                    : _saveAll,
+                                icon: const Icon(
+                                  Icons.download,
+                                ),
+                                label: const Text(
+                                  'Save All HD to Gallery',
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
                       ),
                     ],
                   ),
-                  child: const Icon(Icons.person_search, size: 42),
                 ),
-              );
-            }
-          }
-
-          class EditorSettings {
-            final Offset position;
-            final double scale;
-            final double angle;
-
-            const EditorSettings({
-              this.position = Offset.zero,
-              this.scale = 1,
-              this.angle = 0,
-            });
-
-            EditorSettings copyWith({
-              Offset? position,
-              double? scale,
-              double? angle,
-            }) {
-              return EditorSettings(
-                position: position ?? this.position,
-                scale: scale ?? this.scale,
-                angle: angle ?? this.angle,
-              );
-            }
-          }
-
-          class EditorScreen extends StatefulWidget {
-            final Uint8List cutoutBytes;
-
-            const EditorScreen({
-              super.key,
-              required this.cutoutBytes,
-            });
-
-            @override
-            State<EditorScreen> createState() => _EditorScreenState();
-          }
-
-          class _EditorScreenState extends State<EditorScreen> {
-            late final Future<ui.Image> cutoutImage;
-            final List<EditorSettings> history = [const EditorSettings()];
-            int historyIndex = 0;
-
-            Offset gestureStartPosition = Offset.zero;
-            double gestureStartScale = 1;
-            double gestureStartAngle = 0;
-            bool showGuides = false;
-
-            EditorSettings get settings => history[historyIndex];
-
-            @override
-            void initState() {
-              super.initState();
-              cutoutImage = decodeImageFromList(widget.cutoutBytes);
-            }
-
-            void saveGestureState() {
-              if (historyIndex < history.length - 1) {
-                history.removeRange(historyIndex + 1, history.length);
-              }
-              history.add(settings);
-              historyIndex = history.length - 1;
-            }
-
-            void undo() {
-              if (historyIndex > 0) setState(() => historyIndex--);
-            }
-
-            void redo() {
-              if (historyIndex < history.length - 1) {
-                setState(() => historyIndex++);
-              }
-            }
-
-            Future<void> exportPng() async {
-              try {
-                final bytes = await renderPng();
-                final directory = await getTemporaryDirectory();
-                final file = File(
-                  '${directory.path}/my_photoroom_'
-                  '${DateTime.now().millisecondsSinceEpoch}.png',
-                );
-                await file.writeAsBytes(bytes);
-                await Gal.putImage(file.path, album: 'My PhotoRoom');
-
-                if (!mounted) return;
-                ScaffoldMessenger.of(context).showSnackBar(
-                  const SnackBar(content: Text('Saved to gallery')),
-                );
-              } catch (error) {
-                if (!mounted) return;
-                ScaffoldMessenger.of(context).showSnackBar(
-                  SnackBar(content: Text('Export failed: $error')),
-                );
-              }
-            }
-
-            Future<Uint8List> renderPng() async {
-              const int outputSize = 2048;
-              final image = await cutoutImage;
-              final recorder = ui.PictureRecorder();
-              final canvas = Canvas(recorder);
-
-              final double ratio = image.width > image.height
-                  ? image.height / image.width
-                  : image.width / image.height;
-              final double baseWidth = image.width > image.height
-                  ? outputSize.toDouble()
-                  : outputSize * ratio;
-              final double baseHeight = image.height >= image.width
-                  ? outputSize.toDouble()
-                  : outputSize * ratio;
-
-              final double drawWidth = baseWidth * settings.scale;
-              final double drawHeight = baseHeight * settings.scale;
-              final double dx =
-                  outputSize / 2 - drawWidth / 2 + settings.position.dx * 2;
-              final double dy =
-                  outputSize / 2 - drawHeight / 2 + settings.position.dy * 2;
-
-              canvas.save();
-              canvas.translate(dx + drawWidth / 2, dy + drawHeight / 2);
-              canvas.rotate(settings.angle);
-              canvas.translate(-drawWidth / 2, -drawHeight / 2);
-              canvas.drawImageRect(
-                image,
-                Rect.fromLTWH(
-                  0,
-                  0,
-                  image.width.toDouble(),
-                  image.height.toDouble(),
-                ),
-                Rect.fromLTWH(0, 0, drawWidth, drawHeight),
-                Paint(),
-              );
-              canvas.restore();
-
-              final rendered = await recorder.endRecording().toImage(
-                    outputSize,
-                    outputSize,
-                  );
-              final data = await rendered.toByteData(
-                format: ui.ImageByteFormat.png,
-              );
-              if (data == null) throw Exception('Unable to encode PNG');
-              return data.buffer.asUint8List();
-            }
-
-            @override
-            Widget build(BuildContext context) {
-              return Scaffold(
-                appBar: AppBar(
-                  title: const Text(
-                    'Edit Photo',
-                    style: TextStyle(fontWeight: FontWeight.w800),
-                  ),
-                  actions: [
-                    IconButton(
-                      onPressed: historyIndex > 0 ? undo : null,
-                      icon: const Icon(Icons.undo),
-                    ),
-                    IconButton(
-                      onPressed:
-                          historyIndex < history.length - 1 ? redo : null,
-                      icon: const Icon(Icons.redo),
-                    ),
-                    Padding(
-                      padding: const EdgeInsets.only(right: 12),
-                      child: FilledButton.icon(
-                        onPressed: exportPng,
-                        icon: const Icon(Icons.download),
-                        label: const Text('Export'),
-                      ),
-                    ),
-                  ],
-                ),
-                body: Column(
-                  children: [
-                    Expanded(
-                      child: LayoutBuilder(
-                        builder: (context, constraints) {
-                          final canvasSize = Size(
-                            constraints.maxWidth,
-                            constraints.maxHeight,
-                          );
-
-                          return GestureDetector(
-                            onScaleStart: (_) {
-                              gestureStartPosition = settings.position;
-                              gestureStartScale = settings.scale;
-                              gestureStartAngle = settings.angle;
-                              setState(() => showGuides = true);
-                            },
-                            onScaleUpdate: (details) {
-                              Offset position =
-                                  gestureStartPosition + details.focalPointDelta;
-
-                              if (position.dx.abs() < 18) {
-                                position = Offset(0, position.dy);
-                              }
-                              if (position.dy.abs() < 18) {
-                                position = Offset(position.dx, 0);
-                              }
-
-                              setState(() {
-                                showGuides =
-                                    position.dx == 0 || position.dy == 0;
-                                history[historyIndex] = settings.copyWith(
-                                  position: position,
-                                  scale: (gestureStartScale * details.scale)
-                                      .clamp(0.25, 5.0),
-                                  angle:
-                                      gestureStartAngle + details.rotation,
-                                );
-                              });
-                            },
-                            onScaleEnd: (_) {
-                              final current = settings;
-                              if (historyIndex < history.length - 1) {
-                                history.removeRange(
-                                  historyIndex + 1,
-                                  history.length,
-                                );
-                              }
-                              history.add(current);
-                              historyIndex = history.length - 1;
-                              setState(() => showGuides = false);
-                            },
-                            child: FutureBuilder<ui.Image>(
-                              future: cutoutImage,
-                              builder: (context, snapshot) {
-                                if (!snapshot.hasData) {
-                                  return const Center(
-                                    child: CircularProgressIndicator(),
-                                  );
-                                }
-                                return CustomPaint(
-                                  painter: CanvasPainter(
-                                    image: snapshot.data!,
-                                    settings: settings,
-                                    showGuides: showGuides,
-                                  ),
-                                  size: canvasSize,
-                                );
-                              },
-                            ),
-                          );
-                        },
-                      ),
-                    ),
-                    Container(
-                      height: 82,
-                      color: const Color(0xFF171820),
-                      child: const Row(
-                        mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-                        children: [
-                          BottomTool(icon: Icons.crop_square, label: 'Canvas'),
-                          BottomTool(
-                            icon: Icons.format_paint,
-                            label: 'Background',
-                          ),
-                          BottomTool(icon: Icons.tune, label: 'Adjust'),
-                          BottomTool(icon: Icons.text_fields, label: 'Text'),
-                        ],
-                      ),
-                    ),
-                  ],
-                ),
-              );
-            }
-          }
-
-          Future<ui.Image> decodeImageFromList(Uint8List bytes) async {
-          final codec = await ui.instantiateImageCodec(bytes);
-          final frame = await codec.getNextFrame();
-          return frame.image;
-
-          }
-
-          class CanvasPainter extends CustomPainter {
-            final ui.Image image;
-            final EditorSettings settings;
-            final bool showGuides;
-
-            CanvasPainter({
-              required this.image,
-              required this.settings,
-              required this.showGuides,
-            });
-
-            @override
-            void paint(Canvas canvas, Size size) {
-              const double square = 16;
-
-              for (double y = 0; y < size.height; y += square) {
-                for (double x = 0; x < size.width; x += square) {
-                  final bool dark =
-                      ((x / square).floor() + (y / square).floor()).isEven;
-                  canvas.drawRect(
-                    Rect.fromLTWH(x, y, square, square),
-                    Paint()
-                      ..color = dark
-                          ? const Color(0xFF1F2028)
-                          : const Color(0xFF272932),
-                  );
-                }
-              }
-
-              if (showGuides) {
-                final guidePaint = Paint()
-                  ..color = const Color(0xFF4DA3FF)
-                  ..strokeWidth = 1.5;
-                canvas.drawLine(
-                  Offset(size.width / 2, 0),
-                  Offset(size.width / 2, size.height),
-                  guidePaint,
-                );
-                canvas.drawLine(
-                  Offset(0, size.height / 2),
-                  Offset(size.width, size.height / 2),
-                  guidePaint,
-                );
-              }
-
-              final double imageWidth;
-              final double imageHeight;
-              if (image.width > image.height) {
-                imageWidth = size.width * 0.72 * settings.scale;
-                imageHeight = imageWidth * image.height / image.width;
-              } else {
-                imageHeight = size.height * 0.72 * settings.scale;
-                imageWidth = imageHeight * image.width / image.height;
-              }
-
-              canvas.save();
-              canvas.translate(
-                size.width / 2 + settings.position.dx,
-                size.height / 2 + settings.position.dy,
-              );
-              canvas.rotate(settings.angle);
-              canvas.drawImageRect(
-                image,
-                Rect.fromLTWH(
-                  0,
-                  0,
-                  image.width.toDouble(),
-                  image.height.toDouble(),
-                ),
-                Rect.fromLTWH(
-                  -imageWidth / 2,
-                  -imageHeight / 2,
-                  imageWidth,
-                  imageHeight,
-                ),
-                Paint(),
-              );
-              canvas.restore();
-            }
-
-            @override
-            bool shouldRepaint(covariant CanvasPainter oldDelegate) {
-              return oldDelegate.settings != settings ||
-                  oldDelegate.showGuides != showGuides ||
-                  oldDelegate.image != image;
-            }
-          }
-
-          class BottomTool extends StatelessWidget {
-            final IconData icon;
-            final String label;
-
-            const BottomTool({
-              super.key,
-              required this.icon,
-              required this.label,
-            });
-
-            @override
-            Widget build(BuildContext context) {
-              return Column(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  Icon(icon, color: Colors.white70),
-                  const SizedBox(height: 6),
-                  Text(
-                    label,
-                    style: const TextStyle(
-                      fontSize: 12,
-                      color: Colors.white70,
-                    ),
-                  ),
-                ],
               );
             }
           }
           EOF
 
-      - name: Configure Android SDK level 36
+      - name: Configure Android SDK and release lint
+        shell: bash
         run: |
-          if [ -f android/app/build.gradle.kts ]; then
-            sed -i \
-              -e 's/compileSdk = flutter.compileSdkVersion/compileSdk = 36/' \
-              -e 's/targetSdk = flutter.targetSdkVersion/targetSdk = 36/' \
-              -e 's/minSdk = flutter.minSdkVersion/minSdk = 21/' \
-              -e 's/JavaVersion.VERSION_11/JavaVersion.VERSION_17/g' \
-              android/app/build.gradle.kts
-          elif [ -f android/app/build.gradle ]; then
-            sed -i \
-              -e 's/compileSdk flutter.compileSdkVersion/compileSdk 36/' \
-              -e 's/targetSdk flutter.targetSdkVersion/targetSdk 36/' \
-              -e 's/minSdk flutter.minSdkVersion/minSdk 21/' \
-              -e 's/JavaVersion.VERSION_11/JavaVersion.VERSION_17/g' \
-              android/app/build.gradle
-          fi
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          candidates = [
+              Path('android/app/build.gradle.kts'),
+              Path('android/app/build.gradle'),
+          ]
+
+          build_file = next(
+              (path for path in candidates if path.exists()),
+              None,
+          )
+
+          if build_file is None:
+              raise SystemExit(
+                  'Flutter Android Gradle build file was not generated'
+              )
+
+          text = build_file.read_text()
+
+          if build_file.suffix == '.kts':
+              replacements = [
+                  (
+                      r'compileSdk\s*=\s*flutter\.compileSdkVersion',
+                      'compileSdk = 36',
+                  ),
+                  (
+                      r'targetSdk\s*=\s*flutter\.targetSdkVersion',
+                      'targetSdk = 36',
+                  ),
+                  (
+                      r'minSdk\s*=\s*flutter\.minSdkVersion',
+                      'minSdk = 24',
+                  ),
+              ]
+
+              lint = (
+                  '    lint {\n'
+                  '        checkReleaseBuilds = false\n'
+                  '        abortOnError = false\n'
+                  '    }\n'
+              )
+          else:
+              replacements = [
+                  (
+                      r'compileSdk\s+flutter\.compileSdkVersion',
+                      'compileSdk 36',
+                  ),
+                  (
+                      r'targetSdk\s+flutter\.targetSdkVersion',
+                      'targetSdk 36',
+                  ),
+                  (
+                      r'minSdk\s+flutter\.minSdkVersion',
+                      'minSdk 24',
+                  ),
+              ]
+
+              lint = (
+                  '    lint {\n'
+                  '        checkReleaseBuilds false\n'
+                  '        abortOnError false\n'
+                  '    }\n'
+              )
+
+          for pattern, replacement in replacements:
+              text, count = re.subn(pattern, replacement, text)
+              if count == 0:
+                  raise SystemExit(
+                      f'Expected Gradle setting not found: {pattern}'
+                  )
+
+          if re.search(r'(?m)^\s*lint\s*\{', text) is None:
+              start = re.search(r'(?m)^android\s*\{', text)
+              if start is None:
+                  raise SystemExit(
+                      'Could not find android { } block '
+                      'to configure lint'
+                  )
+
+              depth = 0
+              quote = None
+              escaped = False
+              end = None
+
+              for i in range(start.end() - 1, len(text)):
+                  ch = text[i]
+
+                  if quote:
+                      if escaped:
+                          escaped = False
+                      elif ch == '\\':
+                          escaped = True
+                      elif ch == quote:
+                          quote = None
+                      continue
+
+                  if ch in ('"', "'"):
+                      quote = ch
+                  elif ch == '{':
+                      depth += 1
+                  elif ch == '}':
+                      depth -= 1
+                      if depth == 0:
+                          end = i
+                          break
+
+              if end is None:
+                  raise SystemExit(
+                      'Could not find end of android { } block'
+                  )
+
+              text = text[:end] + lint + text[end:]
+
+          build_file.write_text(text)
+          print(
+              f'Configured {build_file} for SDK 36 / '
+              'min SDK 24 and release lint'
+          )
+          PY
 
       - name: Install dependencies
         run: flutter pub get
-      - name: Disable Lint Bug
-      
-        run: echo -e "\nandroid { lint { checkReleaseBuilds = false; abortOnError = false } }" >> android/app/build.gradle.kts
-
-   
 
       - name: Build release APK
-        run: flutter build apk --release --no-shrink
+        run: flutter build apk --release
 
       - name: Rename APK
         run: cp build/app/outputs/flutter-apk/app-release.apk app-release.apk
